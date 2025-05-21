@@ -2,7 +2,6 @@ import cympy
 import locale
 from collections import defaultdict, deque
 
-
 #Set and Define Load Flow to run it to get initial values (these will determine what power flows in each node/section
 # to make our PQ model equivalent at any regulators)
 
@@ -134,6 +133,33 @@ def replace_regulators_with_spot_loads(regulator, network):
         
         spot_load.SetValue(kw[phase], f"{base_path}.KW")
         spot_load.SetValue(kvar[phase], f"{base_path}.KVAR")
+        
+
+
+def replace_spot_loads_with_regulators(regulator, network):
+    #Identify SpotLoad to Remove
+    new_spotload_section = regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC"
+    #Delete section with new spotload
+    cympy.study.DeleteSection(new_spotload_section)
+    
+    
+    for section in regulator_dict[regulator][2]:
+        #Get the section that was disconnected
+        cur_section = cympy.study.GetSection(section.ID)
+        #Get the node that was disconnected
+        cur_node = cympy.study.GetNode(cur_section.GetToNode())
+        
+        #Reconnect the section to the node
+        cympy.study.Connect(cur_section, cur_node)
+    
+    
+    
+    
+    #TODO
+    pass
+
+
+
 
             
 #build clusters and dict where keys are all regulators and values are (parent, child) node of the regulator
@@ -144,18 +170,22 @@ clusters = cluster_nodes_by_regulators(feeder_node, regulator_dict)
 network = cympy.study.ListNetworks()[0]
 for regulator in regulator_dict.keys():
     replace_regulators_with_spot_loads(regulator, network)
-    #break
+    
+    
+    replace_spot_loads_with_regulators(regulator, network)
+    break
+
+
+
+
+
+
+###PSEUDO CODE
+
+"""
+For every node, 
+"""
    
     
-# for k, v in regulator_dict.items():
-#     break
 
-# #parent, child node are 
-# p, c, _ = v
-        
     
-
-
-        
-        
-
