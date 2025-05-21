@@ -26,6 +26,24 @@ feeder_node = all_nodes[0]
 #dictionary that relates a regulator to its downstream node (where we disconnect to attach new spot load)
 regulator_dict = defaultdict()
 
+
+#Gets power flow into a node, t
+def get_power_flow_regulator(regulator):
+    kw_keywords = ["KWA", "KWB", "KWC"]
+    kvar_keywords = ["KVARA", "KVARB", "KVARC"]
+    
+    kw = []
+    kvar = []
+    regulator_id = regulator.DeviceNumber
+    
+    for kw_keyword in kw_keywords:
+        kw.append(cympy.study.QueryInfoDevice(kw_keyword, regulator_id, cympy.enums.DeviceType.Regulator))
+        
+    for kvar_keyword in kvar_keywords:
+        kvar.append(cympy.study.QueryInfoDevice(kvar_keyword, regulator_id, cympy.enums.DeviceType.Regulator))
+        
+    return kw, kvar
+
 #given a root node, this goes downstreams and returns a 2d array where each index is a cluster of nodes that share the same bfs level
 #assuming levels are delimited by number of regulator crossed from the root node. Each level basically are all cousins
 def cluster_nodes_by_regulators(feeder_node, regulator_dict):
@@ -52,6 +70,11 @@ def cluster_nodes_by_regulators(feeder_node, regulator_dict):
                     #keep cur node as new root delimited by this regulator/transformer
                     #TODO only do this for transformer when conditions are fulfilled (within tap range it can regulate)
                     if device.DeviceType in [0, 1]:
+                        
+                        #Get power flow into regulator
+                        kw, kvar = get_power_flow_regulator(device)
+                        
+                        
                         #Upstream node of regulator
                         cur_parent = cur_iterator.GetFromNode()
                         queue.append(cur_node)
@@ -61,7 +84,8 @@ def cluster_nodes_by_regulators(feeder_node, regulator_dict):
                         
                         cur_iterator.Skip()
                         regulator = True
-                        regulator_dict[device] = (cur_parent, cur_node, next_sections)
+                        #Tuple of (parent, child, next_sections, and power flow in regulator)
+                        regulator_dict[device] = (cur_parent, cur_node, next_sections, kw, kvar)
 
                         #cympy.study.Disconnect(cur_section, cur_node)                  
                         break
@@ -73,26 +97,6 @@ def cluster_nodes_by_regulators(feeder_node, regulator_dict):
     return clusters
 
 
-#build clusters and dict where keys are all regulators and values are (parent, child) node of the regulator
-#use dict to attach spot load to child node and disconnect everything else from it
-clusters = cluster_nodes_by_regulators(feeder_node, regulator_dict)
-
-#Gets power flow into a node, t
-def get_power_flow_regulator(regulator):
-    kw_keywords = ["KWA", "KWB", "KWC"]
-    kvar_keywords = ["KVARA", "KVARB", "KVARC"]
-    
-    kw = []
-    kvar = []
-    regulator_id = regulator.DeviceNumber
-    
-    for kw_keyword in kw_keywords:
-        kw.append(cympy.study.QueryInfoDevice(kw_keyword, regulator_id, cympy.enums.DeviceType.Regulator))
-        
-    for kvar_keyword in kvar_keywords:
-        kvar.append(cympy.study.QueryInfoDevice(kvar_keyword, regulator_id, cympy.enums.DeviceType.Regulator))
-        
-    return kw, kvar
 
 
 
@@ -104,21 +108,38 @@ def get_power_flow_regulator(regulator):
 
 #Give a regulator object to this function
 def replace_regulators_with_spot_loads(regulator, network):
-    #Get power flow into current regulator to be replaced
-    spot_load_kw, spot_load_kvar = get_power_flow_regulator(regulator)
-    
+   
     #Get adjacent nodes to regulator being replaced
-    parent, child, next_sections = regulator_dict[regulator]
-    
-    
+    parent, child, next_sections, kw, kvar = regulator_dict[regulator]
+      
     for section in next_sections:
         cympy.study.Disconnect(section.ID, child.ID)
         
+    new_spotload_section = regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC"
+    new_spotload_device_number = regulator.DeviceNumber + "_NEW_SPOTLOAD_NUM"
+        
     #Add spot load section from child node to parent node
-    cympy.study.AddSection(regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC", network, regulator.DeviceNumber + "_NEW_SPOTLOAD_NUM", cympy.enums.DeviceType.SpotLoad, child.ID)#, parent.ID)
+    cympy.study.AddSection(new_spotload_section, network, new_spotload_device_number, cympy.enums.DeviceType.SpotLoad, child.ID)
     
+    #Reference to Spot Load that was just placed
+    spot_load = cympy.study.GetDevice(new_spotload_device_number, cympy.enums.DeviceType.SpotLoad)
+    #Set the spot load to be a PQ model with appropriate kw, kvar per phase
     
+    for phase in range(len(kw)):
+        # Set the spot load to be a PQ model with appropriate kw, kvar per phase
+        base_path = f"CustomerLoads[0].CustomerLoadModels[0].CustomerLoadValues[{phase}].LoadValue"
+        
+        #print(base_path)
+        
+        
+        spot_load.SetValue(kw[phase], f"{base_path}.KW")
+        spot_load.SetValue(kvar[phase], f"{base_path}.KVAR")
 
+            
+#build clusters and dict where keys are all regulators and values are (parent, child) node of the regulator
+#use dict to attach spot load to child node and disconnect everything else from it
+clusters = cluster_nodes_by_regulators(feeder_node, regulator_dict)
+        
 #Regulator_dict is built by BFS on the network, its keys are all regulators.
 network = cympy.study.ListNetworks()[0]
 for regulator in regulator_dict.keys():
