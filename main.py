@@ -80,11 +80,6 @@ def cluster_nodes_by_regulators(feeder_node, regulator_dict):
                               
     return clusters
 
-
-#build clusters and dict where keys are all regulators and values are (parent, child) node of the regulator
-#use dict to attach spot load to child node and disconnect everything else from it
-clusters = cluster_nodes_by_regulators(feeder_node, regulator_dict)
-
 #Gets power flow into a node, t
 def get_power_flow_regulator(regulator):
     kw_keywords = ["KWA", "KWB", "KWC"]
@@ -112,7 +107,7 @@ def get_power_flow_regulator(regulator):
 
 #Give a regulator object to this function
 def replace_regulators_with_spot_loads(regulator, network):
-    #Get power flow into current regulator to be replaced
+     #Get power flow into current regulator to be replaced
     spot_load_kw, spot_load_kvar = get_power_flow_regulator(regulator)
     
     #Get adjacent nodes to regulator being replaced
@@ -123,17 +118,19 @@ def replace_regulators_with_spot_loads(regulator, network):
         cympy.study.Disconnect(section.ID, child.ID)
         
     #Add spot load section from child node to parent node
-    #cympy.study.AddSection("NEW_SPOTLOAD_SEC", network, "NEW_SPOTLOAD_NUM", cympy.enums.DeviceType.SpotLoad, child, parent)
+    cympy.study.AddSection(regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC", network, regulator.DeviceNumber + "_NEW_SPOTLOAD_NUM", cympy.enums.DeviceType.SpotLoad, child.ID)#, parent.ID)
     
     
     
-#Get regulators
-devices = cympy.study.ListDevices()
-regulators = [device for device in devices if device.DeviceType in [0, 1]]
+    
+#build clusters and dict where keys are all regulators and values are (parent, child) node of the regulator
+#use dict to attach spot load to child node and disconnect everything else from it
+clusters = cluster_nodes_by_regulators(feeder_node, regulator_dict)
+    
 
 
 network = cympy.study.ListNetworks()[0]
-for regulator in regulators:
+for regulator in regulator_dict.keys():
     replace_regulators_with_spot_loads(regulator, network)
     
    
