@@ -142,23 +142,14 @@ def replace_spot_loads_with_regulators(regulator, network):
     #Delete section with new spotload
     cympy.study.DeleteSection(new_spotload_section)
     
+    _, child, next_sections, _, _ = regulator_dict[regulator]
     
-    for section in regulator_dict[regulator][2]:
-        #Get the section that was disconnected
-        cur_section = cympy.study.GetSection(section.ID)
-        #Get the node that was disconnected
-        cur_node = cympy.study.GetNode(cur_section.GetToNode())
+    print(next_sections)
         
+    for section in next_sections:
+        connecting_node = cympy.study.GetSection(section.ID).FromNode
         #Reconnect the section to the node
-        cympy.study.Connect(cur_section, cur_node)
-    
-    
-    
-    
-    #TODO
-    pass
-
-
+        cympy.study.Connect(connecting_node.ID, child.ID)
 
 
             
