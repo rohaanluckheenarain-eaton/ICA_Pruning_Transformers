@@ -105,13 +105,9 @@ def cluster_nodes_by_regulators(feeder_node, regulator_dict):
     return clusters
 
 
-
-
-
 #get power flow into regulator (for spot load EQ replacement). Then initiate iterator to the regulator,
 #travel once upstream to get upstream node and once downstream to get downstream node. (assuming that a node delimits the regulator
 #in both direction. TODO This fails if multiple sections) 
-
 
 
 #Give a regulator object to this function
@@ -143,6 +139,29 @@ def replace_regulators_with_spot_loads(regulator, network):
         spot_load.SetValue(kw[phase], f"{base_path}.KW")
         spot_load.SetValue(kvar[phase], f"{base_path}.KVAR")
         
+def replace_regulators_with_spot_loads_v2(regulator, network):
+    # Get adjacent nodes to regulator being replaced
+    parent, child, next_sections, kw, kvar = regulator_dict[regulator]
+
+    # Disconnect each section using the new method
+    for section in next_sections:
+        ecg = cympy.study.GetDevice(section.DeviceNumber, section.DeviceType)
+        ecg.SetValue('Disconnected', 'ConnectionStatus')
+
+    new_spotload_section = regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC"
+    new_spotload_device_number = regulator.DeviceNumber + "_NEW_SPOTLOAD_NUM"
+
+    # Add spot load section from child node to parent node
+    cympy.study.AddSection(new_spotload_section, network, new_spotload_device_number, cympy.enums.DeviceType.SpotLoad, child.ID)
+
+    # Reference to Spot Load that was just placed
+    spot_load = cympy.study.GetDevice(new_spotload_device_number, cympy.enums.DeviceType.SpotLoad)
+
+    # Set the spot load to be a PQ model with appropriate kw, kvar per phase
+    for phase in range(len(kw)):
+        base_path = f"CustomerLoads[0].CustomerLoadModels[0].CustomerLoadValues[{phase}].LoadValue"
+        spot_load.SetValue(kw[phase], f"{base_path}.KW")
+        spot_load.SetValue(kvar[phase], f"{base_path}.KVAR")
 
 
 def replace_spot_loads_with_regulators(regulator, network):
@@ -161,7 +180,19 @@ def replace_spot_loads_with_regulators(regulator, network):
         cympy.study.Connect(connecting_node.ID, child.ID)
 
 
-            
+def replace_spot_loads_with_regulators_v2(regulator, network):
+    # Identify SpotLoad to Remove
+    new_spotload_section = regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC"
+    # Delete section with new spotload
+    cympy.study.DeleteSection(new_spotload_section)
+
+    _, child, next_sections, _, _ = regulator_dict[regulator]
+
+    for section in next_sections:
+        connecting_node = cympy.study.GetSection(section.ID).FromNode
+        ecg = cympy.study.GetDevice(section.DeviceNumber, section.DeviceType)
+        ecg.SetValue('Connected', 'ConnectionStatus')
+
 #build clusters and dict where keys are all regulators and values are (parent, child) node of the regulator
 #use dict to attach spot load to child node and disconnect everything else from it
 clusters = cluster_nodes_by_regulators(feeder_node, regulator_dict)

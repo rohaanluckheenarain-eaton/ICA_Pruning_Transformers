@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set "VIRTUAL_ENV=C:\Users\E0835974\Desktop\ICA_Optimization\venv"
+set "VIRTUAL_ENV=C:\Users\E0835974\OneDrive - Eaton\RD\ICA_Optimization\venv"
 
 if not defined PROMPT set PROMPT=$P$G
 

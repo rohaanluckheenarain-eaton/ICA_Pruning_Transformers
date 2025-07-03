@@ -18,15 +18,12 @@ load_flow.SetValue(20, "ParametersConfigurations[0].LoadFlowLoadScalingFactors.P
 load_flow.SetValue(20, "ParametersConfigurations[0].LoadFlowLoadScalingFactors.Q")
 #Run load flow
 load_flow.Run()
-
-#List all nodes and get the feeder node
-all_nodes = cympy.study.ListNodes()
-feeder_node = all_nodes[0]
-#dictionary that relates a regulator to its downstream node (where we disconnect to attach new spot load)
-regulator_dict = defaultdict()
+#Get the Network
+network = cympy.study.ListNetworks()[0]
 
 
-#Gets power flow into a node, t
+
+#Gets power flow into a node, through a regulator
 def get_power_flow_regulator(regulator):
     kw_keywords = ["KWA", "KWB", "KWC"]
     kvar_keywords = ["KVARA", "KVARB", "KVARC"]
@@ -43,140 +40,167 @@ def get_power_flow_regulator(regulator):
         
     return kw, kvar
 
-#given a root node, this goes downstreams and returns a 2d array where each index is a cluster of nodes that share the same bfs level
-#assuming levels are delimited by number of regulator crossed from the root node. Each level basically are all cousins
-def cluster_nodes_by_regulators(feeder_node, regulator_dict):
-  
-    # Initialize clusters and queue
-    clusters = []
-    queue = deque([feeder_node])
+
+#Given any node, find downstream first regulator/transformers. Go upstream and do the same (ignoring the path
+# that was traversed upwards from). Recursively do this until we reach the root node (Feeder)
+def map_regulators_to_node(start_node, node_regulator_dict, verbose=True):
+    """
+    Maps all relevant regulators to the given start_node.
+    This includes:
+    - Immediate downstream regulators from the node.
+    - First regulators found in sibling branches of all upstream nodes.
     
-    while queue:
-        clusters.append([])
+    Parameters:
+    - start_node: the node to map regulators for
+    - node_regulator_dict: dictionary to store the result
+    - verbose: if True, prints detailed traversal logs
+    """
+    node_regulator_dict[start_node] = set()
+    collected_regulators = set()
 
-        for _ in range(len(queue)):
-            cur_root_node = queue.popleft()
-            clusters[-1].append(cur_root_node)
+    def find_first_downstream_regulators(node, exclude_node=None):
+        regulators = set()
+        iterator = cympy.study.NetworkIterator(node.ID)
 
-            cur_iterator = cympy.study.NetworkIterator(cur_root_node.ID)
-            while cur_iterator.Next():
-                cur_node, cur_devices = cur_iterator.GetNode(), cur_iterator.GetDevices()
-            
-                           
-                regulator = False
-                #Device Type of 0 or 1 is transformer or regulator, respectively
-                for device in cur_devices:
-                    #keep cur node as new root delimited by this regulator/transformer
-                    #TODO only do this for transformer when conditions are fulfilled (within tap range it can regulate)
-                    if device.DeviceType in [0, 1]:
-                        
-                        #Get power flow into regulator
-                        kw, kvar = get_power_flow_regulator(device)
-                        
-                        
-                        #Upstream node of regulator
-                        cur_parent = cur_iterator.GetFromNode()
-                        queue.append(cur_node)
-                        #Get all downstream adjacent section from child node of regulator
-                        next_sections = cur_iterator.ListNextSections()
-                        
-                        
-                        cur_iterator.Skip()
-                        regulator = True
-                        #Tuple of (parent, child, next_sections, and power flow in regulator)
-                        regulator_dict[device] = (cur_parent, cur_node, next_sections, kw, kvar)
+        if verbose:
+            print(f"\n  Exploring downstream from node {node.ID} (excluding {exclude_node.ID if exclude_node else 'None'})")
 
-                        #cympy.study.Disconnect(cur_section, cur_node)                  
-                        break
-                
-                #if not a regulator, not a transformer, and not a valid transformer, add to cur cluster as non delimited
-                if not regulator and cur_node:
-                        clusters[-1].append(cur_node)
-                              
-    return clusters
+        while iterator.Next():
+            downstream_node = iterator.GetNode()
+            if exclude_node and downstream_node.ID == exclude_node.ID:
+                if verbose:
+                    print(f"    Skipping excluded node {exclude_node.ID}")
+                iterator.Skip()
+                continue
+
+            devices = iterator.GetDevices()
+            for device in devices:
+                if device.DeviceType in [0, 1]:  # Regulator or Transformer
+                    if verbose:
+                        print(f"    Found regulator {device.DeviceNumber} on edge {node.ID} → {downstream_node.ID}")
+                    regulators.add(device)
+                    iterator.Skip()
+                    break
+
+        return regulators
+
+    if verbose:
+        print(f"\nStarting regulator mapping for node {start_node.ID}")
+
+    immediate = find_first_downstream_regulators(start_node)
+    collected_regulators.update(immediate)
+
+    if verbose:
+        print(f"  Immediate downstream regulators for {start_node.ID}: {[r.DeviceNumber for r in immediate]}")
+
+    upstream_iterator = cympy.study.NetworkIterator(start_node.ID, cympy.enums.IterationOption.Upstream)
+
+    while upstream_iterator.Next():
+        parent = upstream_iterator.GetNode()
+        child = upstream_iterator.GetFromNode()
+
+        if verbose:
+            print(f"\nMoving upstream to parent node {parent.ID} from {child.ID}")
+
+        sibling_regulators = find_first_downstream_regulators(parent, exclude_node=child)
+        collected_regulators.update(sibling_regulators)
+
+        if verbose:
+            print(f"  Regulators found in sibling branches of {parent.ID}: {[r.DeviceNumber for r in sibling_regulators]}")
+
+        upstream_iterator = cympy.study.NetworkIterator(parent.ID, cympy.enums.IterationOption.Upstream)
+
+    node_regulator_dict[start_node] = collected_regulators
+    print(f"\n✅ Final regulator set for node {start_node.ID}: {[r.DeviceNumber for r in collected_regulators]}")
 
 
+def replace_regulators_with_spot_loads(regulator, network, regulator_dict):
+    # Get the downstream node of the regulator
+    child = cympy.study.GetNode(
+        cympy.study.QueryInfoDevice("ToNodeId", regulator.DeviceNumber, regulator.DeviceType)
+    )
 
+    # Disconnect the upstream section from the child node
+    upstream_iterator = cympy.study.NetworkIterator(child.ID, cympy.enums.IterationOption.Upstream)
+    upstream_iterator.Next()
+    up_section = upstream_iterator.GetSection()
+    cympy.study.Disconnect(up_section.ID, child.ID)
+    
+    #New node created from disconnecting regulator (downstream of regulator)
+    new_node = cympy.study.GetNode(cympy.study.QueryInfoDevice("ToNodeId", regulator.DeviceNumber, regulator.DeviceType))
 
-
-#get power flow into regulator (for spot load EQ replacement). Then initiate iterator to the regulator,
-#travel once upstream to get upstream node and once downstream to get downstream node. (assuming that a node delimits the regulator
-#in both direction. TODO This fails if multiple sections) 
-
-
-
-#Give a regulator object to this function
-def replace_regulators_with_spot_loads(regulator, network):
-   
-    #Get adjacent nodes to regulator being replaced
-    parent, child, next_sections, kw, kvar = regulator_dict[regulator]
-      
-    for section in next_sections:
-        cympy.study.Disconnect(section.ID, child.ID)
-        
+    # Add a new spot load section at the child node
     new_spotload_section = regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC"
     new_spotload_device_number = regulator.DeviceNumber + "_NEW_SPOTLOAD_NUM"
-        
-    #Add spot load section from child node to parent node
-    cympy.study.AddSection(new_spotload_section, network, new_spotload_device_number, cympy.enums.DeviceType.SpotLoad, child.ID)
+
+    cympy.study.AddSection(
+        new_spotload_section,
+        network,
+        new_spotload_device_number,
+        cympy.enums.DeviceType.SpotLoad,
+        new_node.ID
+    )
     
-    #Reference to Spot Load that was just placed
     spot_load = cympy.study.GetDevice(new_spotload_device_number, cympy.enums.DeviceType.SpotLoad)
-    #Set the spot load to be a PQ model with appropriate kw, kvar per phase
+
+   # Get kW and kVAR values of power flow through regulator as they dictate what the EQ spot load power consumption will be
+    kw, kvar, _ = regulator_dict[regulator]
     
     for phase in range(len(kw)):
-        # Set the spot load to be a PQ model with appropriate kw, kvar per phase
         base_path = f"CustomerLoads[0].CustomerLoadModels[0].CustomerLoadValues[{phase}].LoadValue"
-        
-        #print(base_path)
-        
-        
         spot_load.SetValue(kw[phase], f"{base_path}.KW")
         spot_load.SetValue(kvar[phase], f"{base_path}.KVAR")
         
-
-
-def replace_spot_loads_with_regulators(regulator, network):
-    #Identify SpotLoad to Remove
+    #Update regulator_dict entry for cur regulator to keep track of original child node of cur regulator
+    regulator_dict[regulator] = (kw, kvar, child)
+        
+      
+def replace_spot_loads_with_regulators(regulator, regulator_dict):
+    #Get the section created with the spot load EQ model for the current regulator
     new_spotload_section = regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC"
-    #Delete section with new spotload
-    cympy.study.DeleteSection(new_spotload_section)
-    
-    _, child, next_sections, _, _ = regulator_dict[regulator]
-    
-    print(next_sections)
+  
+    # Get the original child node of the regulator
+    _, _, child = regulator_dict[regulator]
+    #If child not instantiated for current spot load, it means it was never EQ'd, so we cannot replace it with a regulator
+    try:
+        if not child:
+            raise ValueError("Child node is None, cannot replace spot load with regulator as it was never EQ'd")
         
-    for section in next_sections:
-        connecting_node = cympy.study.GetSection(section.ID).FromNode
-        #Reconnect the section to the node
-        cympy.study.Connect(connecting_node.ID, child.ID)
-
-
-            
-#build clusters and dict where keys are all regulators and values are (parent, child) node of the regulator
-#use dict to attach spot load to child node and disconnect everything else from it
-clusters = cluster_nodes_by_regulators(feeder_node, regulator_dict)
-        
-#Regulator_dict is built by BFS on the network, its keys are all regulators.
-network = cympy.study.ListNetworks()[0]
-for regulator in regulator_dict.keys():
-    replace_regulators_with_spot_loads(regulator, network)
+        # Delete the spot load section that was created, if the section doesn't exist, a Value Error will be raised which means
+        #The regulator also did not have a spot load EQ model, so we cannot remove it
+        cympy.study.DeleteSection(new_spotload_section)
+    except ValueError as e:
+        return
     
-    
-    replace_spot_loads_with_regulators(regulator, network)
-    break
+    new_node = cympy.study.GetNode(cympy.study.QueryInfoDevice("ToNodeId", regulator.DeviceNumber, regulator.DeviceType))
+    #reconnect regulator as originally connected
+    cympy.study.Connect(new_node.ID, child.ID)
+
+           
+#List all nodes and get the feeder node
+all_nodes = cympy.study.ListNodes()
+#Relate all regulators to their equivalent EQ model for power flow, key is regulator DeviceNumber,
+#value is tuple of two lists ( [KWA, KWB, KWC], [KVARA, KVARB, KVARC] )
+regulator_dict = defaultdict(tuple)
+#For all device in the network, get power flow of regulators/transformers
+for device in cympy.study.ListDevices():
+    if device.DeviceType in [0, 1]:
+        #two list of three values for each phases
+        triple_kw, triple_kvar = get_power_flow_regulator(device)
+        regulator_dict[device] = (triple_kw, triple_kvar, None)
+
+#keys are nodes, values is list of regulators that need to be replaced with spot loads EQ model
+node_regulator_dict = defaultdict(set)
+
+               
+#Get list of regulators to replace for all nodes for ICA optimization
+for node in all_nodes:
+    map_regulators_to_node(node, node_regulator_dict, verbose = False)
+
+regulators = [x for x in cympy.study.ListDevices() if x.DeviceType in [0, 1]]
+regulator = regulators[3]
 
 
+replace_regulators_with_spot_loads(regulator, network, regulator_dict)
+replace_spot_loads_with_regulators(regulator, regulator_dict)
 
-
-
-
-###PSEUDO CODE
-
-"""
-For every node, 
-"""
-   
-    
-
-    
