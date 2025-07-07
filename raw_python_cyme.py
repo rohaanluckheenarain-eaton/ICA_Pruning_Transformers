@@ -21,8 +21,6 @@ load_flow.Run()
 #Get the Network
 network = cympy.study.ListNetworks()[0]
 
-
-
 #Gets power flow into a node, through a regulator
 def get_power_flow_regulator(regulator):
     kw_keywords = ["KWA", "KWB", "KWC"]
@@ -39,7 +37,6 @@ def get_power_flow_regulator(regulator):
         kvar.append(cympy.study.QueryInfoDevice(kvar_keyword, regulator_id, cympy.enums.DeviceType.Regulator))
         
     return kw, kvar
-
 
 #Given any node, find downstream first regulator/transformers. Go upstream and do the same (ignoring the path
 # that was traversed upwards from). Recursively do this until we reach the root node (Feeder)
@@ -113,7 +110,7 @@ def map_regulators_to_node(start_node, node_regulator_dict, verbose=True):
     node_regulator_dict[start_node] = collected_regulators
     print(f"\n✅ Final regulator set for node {start_node.ID}: {[r.DeviceNumber for r in collected_regulators]}")
 
-
+#given a regulator, replace it with a spot load EQ model that will be used for power flow calculations
 def replace_regulators_with_spot_loads(regulator, network, regulator_dict):
     # Get the downstream node of the regulator
     child = cympy.study.GetNode(
@@ -154,7 +151,8 @@ def replace_regulators_with_spot_loads(regulator, network, regulator_dict):
     #Update regulator_dict entry for cur regulator to keep track of original child node of cur regulator
     regulator_dict[regulator] = (kw, kvar, child)
         
-      
+#Given a regulator, reconnect it to the original child node that was disconnected when the regulator was replaced with a spot load EQ model.
+#this fails if called on a regulator that was never EQ'd with a spot load model, in which case the child node will be None
 def replace_spot_loads_with_regulators(regulator, regulator_dict):
     #Get the section created with the spot load EQ model for the current regulator
     new_spotload_section = regulator.DeviceNumber + "_NEW_SPOTLOAD_SEC"
@@ -177,6 +175,31 @@ def replace_spot_loads_with_regulators(regulator, regulator_dict):
     cympy.study.Connect(new_node.ID, child.ID)
 
            
+#Given a node, using node_regulator_dict, replace all regulators with spot loads EQ models, run ICA and record the result for that specific node.
+#Put the circuit back to its original state by replacing the spot loads with regulators EQ models.
+def ICA_Replace_Regulators_With_Spot_Loads(node):           
+    """
+    Replaces all regulators in the node with spot loads, runs ICA, and then restores the original state.
+    
+    Parameters:
+    - node: the node to process
+    """
+    # Get all regulators for the node
+    regulators = node_regulator_dict[node]
+    
+    # Replace each regulator with a spot load
+    for regulator in regulators:
+        replace_regulators_with_spot_loads(regulator, network, regulator_dict)
+    
+    # Run ICA (assuming this is a placeholder for actual ICA logic)
+    print(f"Running ICA for node {node.ID} with replaced spot loads...")
+    
+    # Restore original state by replacing spot loads back with regulators
+    for regulator in regulators:
+        replace_spot_loads_with_regulators(regulator, regulator_dict)
+    
+    print(f"Restored original state for node {node.ID}")
+           
 #List all nodes and get the feeder node
 all_nodes = cympy.study.ListNodes()
 #Relate all regulators to their equivalent EQ model for power flow, key is regulator DeviceNumber,
@@ -197,10 +220,15 @@ node_regulator_dict = defaultdict(set)
 for node in all_nodes:
     map_regulators_to_node(node, node_regulator_dict, verbose = False)
 
-regulators = [x for x in cympy.study.ListDevices() if x.DeviceType in [0, 1]]
-regulator = regulators[3]
+#Testing new algorithm on N419 (node at index 0)
+#ICA_Replace_Regulators_With_Spot_Loads(all_nodes[0])
 
 
-replace_regulators_with_spot_loads(regulator, network, regulator_dict)
-replace_spot_loads_with_regulators(regulator, regulator_dict)
 
+# replace_regulators_with_spot_loads(regulator, network, regulator_dict)
+# replace_spot_loads_with_regulators(regulator, regulator_dict)
+
+#node 25
+node = all_nodes[12]
+
+ICA_Replace_Regulators_With_Spot_Loads(node)
